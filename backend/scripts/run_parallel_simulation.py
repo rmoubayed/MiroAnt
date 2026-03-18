@@ -1126,8 +1126,8 @@ async def run_twitter_simulation(
     
     log_info("Initializing...")
     
-    # Twitter uses standard LLM configuration
-    model = create_model(config, use_boost=False)
+    # Twitter uses boost LLM configuration (same as Reddit -- simulation rounds are high-volume)
+    model = create_model(config, use_boost=True)
     
     # OASIS Twitter uses CSV format
     profile_path = os.path.join(simulation_dir, "twitter_profiles.csv")

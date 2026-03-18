@@ -432,34 +432,41 @@ class RedditSimulationRunner:
     
     def _create_model(self):
         """
-        Create LLM model
-        
-        Uses configuration from the project root .env file (highest priority):
-        - LLM_API_KEY: API key
-        - LLM_BASE_URL: API base URL
-        - LLM_MODEL_NAME: Model name
+        Create LLM model for simulation rounds.
+
+        Prefers boost config (LLM_BOOST_*) when available -- simulation rounds
+        are high-volume (hundreds of agent decisions) so a fast, cheap model is
+        correct here. Falls back to standard LLM_* config if boost is not set.
         """
-        # Prefer reading config from .env
-        llm_api_key = os.environ.get("LLM_API_KEY", "")
-        llm_base_url = os.environ.get("LLM_BASE_URL", "")
-        llm_model = os.environ.get("LLM_MODEL_NAME", "")
-        
-        # Fall back to config if not in .env
+        boost_api_key = os.environ.get("LLM_BOOST_API_KEY", "")
+        boost_base_url = os.environ.get("LLM_BOOST_BASE_URL", "")
+        boost_model = os.environ.get("LLM_BOOST_MODEL_NAME", "")
+
+        if boost_api_key:
+            llm_api_key = boost_api_key
+            llm_base_url = boost_base_url
+            llm_model = boost_model or os.environ.get("LLM_MODEL_NAME", "")
+            config_label = "[Boost LLM]"
+        else:
+            llm_api_key = os.environ.get("LLM_API_KEY", "")
+            llm_base_url = os.environ.get("LLM_BASE_URL", "")
+            llm_model = os.environ.get("LLM_MODEL_NAME", "")
+            config_label = "[Standard LLM]"
+
         if not llm_model:
             llm_model = self.config.get("llm_model", "gpt-4o-mini")
-        
-        # Set environment variables required by camel-ai
+
         if llm_api_key:
             os.environ["OPENAI_API_KEY"] = llm_api_key
-        
+
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("Missing API Key configuration. Please set LLM_API_KEY in the project root .env file")
-        
+
         if llm_base_url:
             os.environ["OPENAI_API_BASE_URL"] = llm_base_url
-        
-        print(f"LLM config: model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else 'default'}...")
-        
+
+        print(f"{config_label} model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else 'default'}...")
+
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI,
             model_type=llm_model,
