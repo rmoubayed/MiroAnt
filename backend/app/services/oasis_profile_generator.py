@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from openai import OpenAI
-from zep_cloud.client import Zep
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.graphiti_client import get_graphiti_sync, run_async
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.oasis_profile')
@@ -178,35 +178,33 @@ class OasisProfileGenerator:
     ]
     
     def __init__(
-        self, 
+        self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model_name: Optional[str] = None,
-        zep_api_key: Optional[str] = None,
-        graph_id: Optional[str] = None
+        graph_id: Optional[str] = None,
+        **kwargs,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
-        
+
         if not self.api_key:
             raise ValueError("LLM_API_KEY not configured")
-        
+
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url
         )
-        
-        # Zep client for retrieval to enrich context
-        self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
-        self.zep_client = None
+
+        # Graphiti client for retrieval to enrich context
+        self.graphiti = None
         self.graph_id = graph_id
-        
-        if self.zep_api_key:
-            try:
-                self.zep_client = Zep(api_key=self.zep_api_key)
-            except Exception as e:
-                logger.warning(f"Zep client initialization failed: {e}")
+
+        try:
+            self.graphiti = get_graphiti_sync()
+        except Exception as e:
+            logger.warning(f"Graphiti client initialization failed: {e}")
     
     def generate_profile_from_entity(
         self, 
@@ -295,118 +293,70 @@ class OasisProfileGenerator:
         Returns:
             Dict containing facts, node_summaries, context
         """
-        import concurrent.futures
-        
-        if not self.zep_client:
+        if not self.graphiti:
             return {"facts": [], "node_summaries": [], "context": ""}
-        
+
         entity_name = entity.name
-        
+
         results = {
             "facts": [],
             "node_summaries": [],
             "context": ""
         }
-        
+
         # graph_id is required for search
         if not self.graph_id:
-            logger.debug(f"Skipping Zep retrieval: graph_id not set")
+            logger.debug("Skipping retrieval: graph_id not set")
             return results
-        
+
         comprehensive_query = f"All information, activities, events, relationships and background about {entity_name}"
-        
+
         def search_edges():
             """Search edges (facts/relationships) - with retry mechanism"""
             max_retries = 3
-            last_exception = None
             delay = 2.0
-            
+
             for attempt in range(max_retries):
                 try:
-                    return self.zep_client.graph.search(
-                        query=comprehensive_query,
-                        graph_id=self.graph_id,
-                        limit=30,
-                        scope="edges",
-                        reranker="rrf"
+                    return run_async(
+                        self.graphiti.search(
+                            query=comprehensive_query,
+                            group_ids=[self.graph_id],
+                            num_results=30,
+                        )
                     )
                 except Exception as e:
-                    last_exception = e
                     if attempt < max_retries - 1:
-                        logger.debug(f"Zep edge search attempt {attempt + 1} failed: {str(e)[:80]}, retrying...")
+                        logger.debug(f"Edge search attempt {attempt + 1} failed: {str(e)[:80]}, retrying...")
                         time.sleep(delay)
                         delay *= 2
                     else:
-                        logger.debug(f"Zep edge search failed after {max_retries} attempts: {e}")
+                        logger.debug(f"Edge search failed after {max_retries} attempts: {e}")
             return None
-        
-        def search_nodes():
-            """Search nodes (entity summaries) - with retry mechanism"""
-            max_retries = 3
-            last_exception = None
-            delay = 2.0
-            
-            for attempt in range(max_retries):
-                try:
-                    return self.zep_client.graph.search(
-                        query=comprehensive_query,
-                        graph_id=self.graph_id,
-                        limit=20,
-                        scope="nodes",
-                        reranker="rrf"
-                    )
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.debug(f"Zep node search attempt {attempt + 1} failed: {str(e)[:80]}, retrying...")
-                        time.sleep(delay)
-                        delay *= 2
-                    else:
-                        logger.debug(f"Zep node search failed after {max_retries} attempts: {e}")
-            return None
-        
+
         try:
-            # Run edge and node searches in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                edge_future = executor.submit(search_edges)
-                node_future = executor.submit(search_nodes)
-                
-                # Get results
-                edge_result = edge_future.result(timeout=30)
-                node_result = node_future.result(timeout=30)
-            
-            # Process edge search results
+            # Run edge search
+            edge_result = search_edges()
+
+            # Process edge search results (Graphiti returns list of EntityEdge)
             all_facts = set()
-            if edge_result and hasattr(edge_result, 'edges') and edge_result.edges:
-                for edge in edge_result.edges:
-                    if hasattr(edge, 'fact') and edge.fact:
-                        all_facts.add(edge.fact)
+            if edge_result:
+                for edge in edge_result:
+                    fact = getattr(edge, 'fact', '')
+                    if fact:
+                        all_facts.add(fact)
             results["facts"] = list(all_facts)
-            
-            # Process node search results
-            all_summaries = set()
-            if node_result and hasattr(node_result, 'nodes') and node_result.nodes:
-                for node in node_result.nodes:
-                    if hasattr(node, 'summary') and node.summary:
-                        all_summaries.add(node.summary)
-                    if hasattr(node, 'name') and node.name and node.name != entity_name:
-                        all_summaries.add(f"Related entity: {node.name}")
-            results["node_summaries"] = list(all_summaries)
-            
+
             # Build combined context
             context_parts = []
             if results["facts"]:
                 context_parts.append("Fact information:\n" + "\n".join(f"- {f}" for f in results["facts"][:20]))
-            if results["node_summaries"]:
-                context_parts.append("Related entities:\n" + "\n".join(f"- {s}" for s in results["node_summaries"][:10]))
             results["context"] = "\n\n".join(context_parts)
-            
-            logger.info(f"Zep hybrid retrieval complete: {entity_name}, got {len(results['facts'])} facts, {len(results['node_summaries'])} related nodes")
-            
-        except concurrent.futures.TimeoutError:
-            logger.warning(f"Zep retrieval timeout ({entity_name})")
+
+            logger.info(f"Graphiti retrieval complete: {entity_name}, got {len(results['facts'])} facts")
+
         except Exception as e:
-            logger.warning(f"Zep retrieval failed ({entity_name}): {e}")
+            logger.warning(f"Graphiti retrieval failed ({entity_name}): {e}")
         
         return results
     

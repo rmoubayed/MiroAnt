@@ -361,7 +361,7 @@ Based on the above content, design entity types and relationship types suitable 
             '"""',
             '',
             'from pydantic import Field',
-            'from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel',
+            'from pydantic import BaseModel',
             '',
             '',
             '# ============== Entity Type Definitions ==============',
@@ -373,7 +373,7 @@ Based on the above content, design entity types and relationship types suitable 
             name = entity["name"]
             desc = entity.get("description", f"A {name} entity.")
             
-            code_lines.append(f'class {name}(EntityModel):')
+            code_lines.append(f'class {name}(BaseModel):')
             code_lines.append(f'    """{desc}"""')
             
             attrs = entity.get("attributes", [])
@@ -381,7 +381,7 @@ Based on the above content, design entity types and relationship types suitable 
                 for attr in attrs:
                     attr_name = attr["name"]
                     attr_desc = attr.get("description", attr_name)
-                    code_lines.append(f'    {attr_name}: EntityText = Field(')
+                    code_lines.append(f'    {attr_name}: str = Field(')
                     code_lines.append(f'        description="{attr_desc}",')
                     code_lines.append(f'        default=None')
                     code_lines.append(f'    )')
@@ -401,7 +401,7 @@ Based on the above content, design entity types and relationship types suitable 
             class_name = ''.join(word.capitalize() for word in name.split('_'))
             desc = edge.get("description", f"A {name} relationship.")
             
-            code_lines.append(f'class {class_name}(EdgeModel):')
+            code_lines.append(f'class {class_name}(BaseModel):')
             code_lines.append(f'    """{desc}"""')
             
             attrs = edge.get("attributes", [])
@@ -409,7 +409,7 @@ Based on the above content, design entity types and relationship types suitable 
                 for attr in attrs:
                     attr_name = attr["name"]
                     attr_desc = attr.get("description", attr_name)
-                    code_lines.append(f'    {attr_name}: EntityText = Field(')
+                    code_lines.append(f'    {attr_name}: str = Field(')
                     code_lines.append(f'        description="{attr_desc}",')
                     code_lines.append(f'        default=None')
                     code_lines.append(f'    )')

@@ -1,7 +1,9 @@
 """
-Zep graph memory update service.
+Graph memory update service.
 
-Dynamically updates agent activities from simulations into a Zep graph.
+Dynamically updates agent activities from simulations into the Graphiti
+knowledge graph. Keeps the same public interface as the original Zep-based
+implementation.
 """
 
 import threading
@@ -11,12 +13,11 @@ from datetime import datetime
 from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
 
-from zep_cloud.client import Zep
-
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.graphiti_client import get_graphiti_sync, run_async
 
-logger = get_logger("mirofish.zep_graph_memory_updater")
+logger = get_logger("mirofish.graph_memory_updater")
 
 
 @dataclass
@@ -32,9 +33,7 @@ class AgentActivity:
     timestamp: str
 
     def to_episode_text(self) -> str:
-        """
-        Convert one activity into natural language for Zep ingestion.
-        """
+        """Convert one activity into natural language for graph ingestion."""
         action_descriptions = {
             "CREATE_POST": self._describe_create_post,
             "LIKE_POST": self._describe_like_post,
@@ -171,36 +170,25 @@ class AgentActivity:
         return f"Executed action {self.action_type}."
 
 
-class ZepGraphMemoryUpdater:
+class GraphMemoryUpdater:
     """
-    Zep graph memory updater.
+    Graph memory updater.
 
-    Monitors activity events and sends them to Zep in platform-based batches.
+    Monitors activity events and sends them to Graphiti in platform-based batches.
     """
 
-    # Number of activities accumulated per platform before sending.
     BATCH_SIZE = 5
-
-    # Platform display names for logs.
     PLATFORM_DISPLAY_NAMES = {
         "twitter": "world 1",
         "reddit": "world 2",
     }
-
-    # Delay between sends to reduce request pressure.
     SEND_INTERVAL = 0.5
-
-    # Retry configuration for failed sends.
     MAX_RETRIES = 3
     RETRY_DELAY = 2
 
-    def __init__(self, graph_id: str, api_key: Optional[str] = None):
+    def __init__(self, graph_id: str):
         self.graph_id = graph_id
-        self.api_key = api_key or Config.ZEP_API_KEY
-        if not self.api_key:
-            raise ValueError("ZEP_API_KEY is not configured.")
-
-        self.client = Zep(api_key=self.api_key)
+        self.graphiti = get_graphiti_sync()
 
         self._activity_queue: Queue = Queue()
         self._platform_buffers: Dict[str, List[AgentActivity]] = {
@@ -219,7 +207,7 @@ class ZepGraphMemoryUpdater:
         self._skipped_count = 0
 
         logger.info(
-            "ZepGraphMemoryUpdater initialized: graph_id=%s, batch_size=%s",
+            "GraphMemoryUpdater initialized: graph_id=%s, batch_size=%s",
             graph_id,
             self.BATCH_SIZE,
         )
@@ -234,10 +222,10 @@ class ZepGraphMemoryUpdater:
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
             daemon=True,
-            name=f"ZepMemoryUpdater-{self.graph_id[:8]}",
+            name=f"GraphMemoryUpdater-{self.graph_id[:8]}",
         )
         self._worker_thread.start()
-        logger.info("ZepGraphMemoryUpdater started: graph_id=%s", self.graph_id)
+        logger.info("GraphMemoryUpdater started: graph_id=%s", self.graph_id)
 
     def stop(self):
         self._running = False
@@ -247,7 +235,7 @@ class ZepGraphMemoryUpdater:
             self._worker_thread.join(timeout=10)
 
         logger.info(
-            "ZepGraphMemoryUpdater stopped: graph_id=%s total_activities=%s "
+            "GraphMemoryUpdater stopped: graph_id=%s total_activities=%s "
             "batches_sent=%s items_sent=%s failed=%s skipped=%s",
             self.graph_id,
             self._total_activities,
@@ -258,9 +246,7 @@ class ZepGraphMemoryUpdater:
         )
 
     def add_activity(self, activity: AgentActivity):
-        """
-        Add an activity to the queue.
-        """
+        """Add an activity to the queue."""
         if activity.action_type == "DO_NOTHING":
             self._skipped_count += 1
             return
@@ -268,15 +254,13 @@ class ZepGraphMemoryUpdater:
         self._activity_queue.put(activity)
         self._total_activities += 1
         logger.debug(
-            "Added activity to Zep queue: %s - %s",
+            "Added activity to queue: %s - %s",
             activity.agent_name,
             activity.action_type,
         )
 
     def add_activity_from_dict(self, data: Dict[str, Any], platform: str):
-        """
-        Build and enqueue an AgentActivity from parsed log data.
-        """
+        """Build and enqueue an AgentActivity from parsed log data."""
         if "event_type" in data:
             return
 
@@ -315,7 +299,7 @@ class ZepGraphMemoryUpdater:
                     if len(self._platform_buffers[platform]) >= self.BATCH_SIZE:
                         batch = self._platform_buffers[platform][: self.BATCH_SIZE]
                         self._platform_buffers[platform] = self._platform_buffers[platform][
-                            self.BATCH_SIZE :
+                            self.BATCH_SIZE:
                         ]
 
                 if batch:
@@ -326,9 +310,7 @@ class ZepGraphMemoryUpdater:
                 time.sleep(1)
 
     def _send_batch_activities(self, activities: List[AgentActivity], platform: str):
-        """
-        Send one platform batch to the Zep graph.
-        """
+        """Send one platform batch to the Graphiti graph."""
         if not activities:
             return
 
@@ -336,10 +318,15 @@ class ZepGraphMemoryUpdater:
 
         for attempt in range(self.MAX_RETRIES):
             try:
-                self.client.graph.add(
-                    graph_id=self.graph_id,
-                    type="text",
-                    data=combined_text,
+                run_async(
+                    self.graphiti.add_episode(
+                        name=f"simulation_{platform}_batch",
+                        episode_body=combined_text,
+                        source_description=f"MiroFish {platform} simulation activity",
+                        reference_time=datetime.now(),
+                        source="text",
+                        group_id=self.graph_id,
+                    )
                 )
                 self._total_sent += 1
                 self._total_items_sent += len(activities)
@@ -370,9 +357,7 @@ class ZepGraphMemoryUpdater:
                     self._failed_count += 1
 
     def _flush_remaining(self):
-        """
-        Drain queue and send all remaining buffered activities.
-        """
+        """Drain queue and send all remaining buffered activities."""
         while not self._activity_queue.empty():
             try:
                 activity = self._activity_queue.get_nowait()
@@ -419,22 +404,20 @@ class ZepGraphMemoryUpdater:
         }
 
 
-class ZepGraphMemoryManager:
-    """
-    Manages one ZepGraphMemoryUpdater per simulation.
-    """
+class GraphMemoryManager:
+    """Manages one GraphMemoryUpdater per simulation."""
 
-    _updaters: Dict[str, ZepGraphMemoryUpdater] = {}
+    _updaters: Dict[str, GraphMemoryUpdater] = {}
     _lock = threading.Lock()
     _stop_all_done = False
 
     @classmethod
-    def create_updater(cls, simulation_id: str, graph_id: str) -> ZepGraphMemoryUpdater:
+    def create_updater(cls, simulation_id: str, graph_id: str) -> GraphMemoryUpdater:
         with cls._lock:
             if simulation_id in cls._updaters:
                 cls._updaters[simulation_id].stop()
 
-            updater = ZepGraphMemoryUpdater(graph_id)
+            updater = GraphMemoryUpdater(graph_id)
             updater.start()
             cls._updaters[simulation_id] = updater
 
@@ -446,7 +429,7 @@ class ZepGraphMemoryManager:
             return updater
 
     @classmethod
-    def get_updater(cls, simulation_id: str) -> Optional[ZepGraphMemoryUpdater]:
+    def get_updater(cls, simulation_id: str) -> Optional[GraphMemoryUpdater]:
         return cls._updaters.get(simulation_id)
 
     @classmethod
@@ -481,3 +464,7 @@ class ZepGraphMemoryManager:
     def get_all_stats(cls) -> Dict[str, Dict[str, Any]]:
         return {sim_id: updater.get_stats() for sim_id, updater in cls._updaters.items()}
 
+
+# Backwards-compatible aliases
+ZepGraphMemoryUpdater = GraphMemoryUpdater
+ZepGraphMemoryManager = GraphMemoryManager

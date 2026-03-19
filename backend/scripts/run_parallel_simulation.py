@@ -66,6 +66,7 @@ if sys.platform == 'win32':
 
 import argparse
 import asyncio
+import gc
 import json
 import logging
 import multiprocessing
@@ -1152,15 +1153,32 @@ async def run_twitter_simulation(
     if os.path.exists(db_path):
         os.remove(db_path)
     
+    # Use memory-efficient Platform subclass to avoid 17+ GB TWHin-BERT
+    # spikes.  The subclass caches post embeddings on disk and only
+    # recomputes new posts in small batches (batch_size=32 ≈ 400 MB peak
+    # instead of batch_size=1000 ≈ 12 GB peak).
+    from memory_efficient_platform import MemoryEfficientTwitterPlatform
+    from oasis.social_platform.channel import Channel
+
+    twitter_channel = Channel()
+    twitter_platform = MemoryEfficientTwitterPlatform(
+        db_path=db_path,
+        channel=twitter_channel,
+        recsys_type="twhin-bert",
+        refresh_rec_post_count=2,
+        max_rec_post_len=2,
+        following_post_count=3,
+        cache_dir=simulation_dir,
+    )
     result.env = oasis.make(
         agent_graph=result.agent_graph,
-        platform=oasis.DefaultPlatformType.TWITTER,
+        platform=twitter_platform,
         database_path=db_path,
-        semaphore=30,  # Limit max concurrent LLM requests to prevent API overload
+        semaphore=30,
     )
     
     await result.env.reset()
-    log_info("Environment started")
+    log_info("Environment started (memory-efficient platform)")
     
     if action_logger:
         action_logger.log_simulation_start(config)
@@ -1252,6 +1270,7 @@ async def run_twitter_simulation(
         
         actions = {agent: LLMAction() for _, agent in active_agents}
         await result.env.step(actions)
+        gc.collect()
         
         # Fetch actually executed actions from the database and log them
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1451,12 +1470,13 @@ async def run_reddit_simulation(
         
         actions = {agent: LLMAction() for _, agent in active_agents}
         await result.env.step(actions)
+        gc.collect()
         
         # Fetch actually executed actions from the database and log them
         actual_actions, last_rowid = fetch_new_actions_from_db(
             db_path, last_rowid, agent_names
         )
-        
+    
         round_action_count = 0
         for action_data in actual_actions:
             if action_logger:

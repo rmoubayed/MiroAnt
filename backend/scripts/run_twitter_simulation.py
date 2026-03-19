@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -593,13 +594,28 @@ class TwitterSimulationRunner:
             os.remove(db_path)
             print(f"Deleted old database: {db_path}")
         
-        # Create environment
-        print("Creating OASIS environment...")
+        # Use memory-efficient Platform subclass to avoid 17+ GB TWHin-BERT
+        # spikes.  Caches post embeddings on disk, only recomputes new posts
+        # in small batches (batch_size=32 ≈ 400 MB peak).
+        print("Creating OASIS environment (memory-efficient platform)...")
+        from memory_efficient_platform import MemoryEfficientTwitterPlatform
+        from oasis.social_platform.channel import Channel
+
+        twitter_channel = Channel()
+        twitter_platform = MemoryEfficientTwitterPlatform(
+            db_path=db_path,
+            channel=twitter_channel,
+            recsys_type="twhin-bert",
+            refresh_rec_post_count=2,
+            max_rec_post_len=2,
+            following_post_count=3,
+            cache_dir=self.simulation_dir,
+        )
         self.env = oasis.make(
             agent_graph=self.agent_graph,
-            platform=oasis.DefaultPlatformType.TWITTER,
+            platform=twitter_platform,
             database_path=db_path,
-            semaphore=30,  # Limit max concurrent LLM requests to prevent API overload
+            semaphore=30,
         )
         
         await self.env.reset()
@@ -658,6 +674,7 @@ class TwitterSimulationRunner:
             
             # Execute actions
             await self.env.step(actions)
+            gc.collect()
             
             # Print progress
             if (round_num + 1) % 10 == 0 or round_num == 0:

@@ -56,10 +56,10 @@ def get_graph_entities(graph_id: str):
         enrich: Whether to fetch related edge info (default true)
     """
     try:
-        if not Config.ZEP_API_KEY:
+        if not Config.NEO4J_URI:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY not configured"
+                "error": "NEO4J_URI not configured"
             }), 500
         
         entity_types_str = request.args.get('entity_types', '')
@@ -93,10 +93,10 @@ def get_graph_entities(graph_id: str):
 def get_entity_detail(graph_id: str, entity_uuid: str):
     """Get detailed info for a single entity"""
     try:
-        if not Config.ZEP_API_KEY:
+        if not Config.NEO4J_URI:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY not configured"
+                "error": "NEO4J_URI not configured"
             }), 500
         
         reader = ZepEntityReader()
@@ -126,10 +126,10 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
 def get_entities_by_type(graph_id: str, entity_type: str):
     """Get all entities of the specified type"""
     try:
-        if not Config.ZEP_API_KEY:
+        if not Config.NEO4J_URI:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY not configured"
+                "error": "NEO4J_URI not configured"
             }), 500
         
         enrich = request.args.get('enrich', 'true').lower() == 'true'
@@ -1793,30 +1793,25 @@ def get_run_status_detail(simulation_id: str):
                 }
             })
         
-        # Get complete action list
+        # Read JSONL once and filter in-memory instead of calling
+        # get_all_actions() 4 times (each call re-reads the full files).
         all_actions = SimulationRunner.get_all_actions(
             simulation_id=simulation_id,
             platform=platform_filter
         )
         
-        # Get actions by platform
-        twitter_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform="twitter"
-        ) if not platform_filter or platform_filter == "twitter" else []
+        # Filter from the single read instead of re-reading files
+        if not platform_filter:
+            twitter_actions = [a for a in all_actions if a.platform == "twitter"]
+            reddit_actions = [a for a in all_actions if a.platform == "reddit"]
+        else:
+            twitter_actions = all_actions if platform_filter == "twitter" else []
+            reddit_actions = all_actions if platform_filter == "reddit" else []
         
-        reddit_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform="reddit"
-        ) if not platform_filter or platform_filter == "reddit" else []
-        
-        # Get current round actions (recent_actions shows only the latest round)
         current_round = run_state.current_round
-        recent_actions = SimulationRunner.get_all_actions(
-            simulation_id=simulation_id,
-            platform=platform_filter,
-            round_num=current_round
-        ) if current_round > 0 else []
+        recent_actions = [
+            a for a in all_actions if a.round_num == current_round
+        ] if current_round > 0 else []
         
         # Get base status info
         result = run_state.to_dict()
@@ -1824,7 +1819,6 @@ def get_run_status_detail(simulation_id: str):
         result["twitter_actions"] = [a.to_dict() for a in twitter_actions]
         result["reddit_actions"] = [a.to_dict() for a in reddit_actions]
         result["rounds_count"] = len(run_state.rounds)
-        # recent_actions shows only the current latest round for both platforms
         result["recent_actions"] = [a.to_dict() for a in recent_actions]
         
         return jsonify({

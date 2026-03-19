@@ -13,7 +13,7 @@ flask-cors>=6.0.0
 # OpenAI SDK (unified OpenAI format for LLM calls)
 openai>=1.0.0
 
-# ============= Zep Cloud =============
+# ============= Zep (Knowledge Graph) =============
 zep-cloud==3.13.0
 
 # ============= OASIS Social Media Simulation =============

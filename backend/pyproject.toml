@@ -16,7 +16,7 @@ dependencies = [
     # LLM related
     "openai>=1.0.0",
     
-    # Zep Cloud
+    # Zep (Knowledge Graph)
     "zep-cloud==3.13.0",
     
     # OASIS social media simulation
